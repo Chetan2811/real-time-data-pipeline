@@ -1,7 +1,5 @@
 # Plaid Transaction Pipeline
 
-A beginner-friendly Python ETL project using Plaid Sandbox transactions.
-
 The pipeline has three steps:
 
 1. Extract transactions from Plaid Sandbox into JSON.
