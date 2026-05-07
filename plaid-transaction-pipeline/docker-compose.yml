@@ -1,0 +1,17 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: plaid_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-plaid_transactions}
+      POSTGRES_USER: ${POSTGRES_USER:-plaid_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plaid_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/create_tables.sql:/docker-entrypoint-initdb.d/create_tables.sql
+
+volumes:
+  postgres_data:
