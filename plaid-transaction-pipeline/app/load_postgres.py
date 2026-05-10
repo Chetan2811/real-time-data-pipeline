@@ -1,3 +1,4 @@
+"""
 import csv
 from pathlib import Path
 
@@ -27,7 +28,7 @@ def load_transactions():
 
                 for row in reader:
                     cursor.execute(
-                        """
+                        """ """
                         INSERT INTO transactions (
                             transaction_id,
                             account_id,
@@ -49,7 +50,7 @@ def load_transactions():
                             iso_currency_code = EXCLUDED.iso_currency_code,
                             category = EXCLUDED.category,
                             pending = EXCLUDED.pending;
-                        """,
+                        """ """,
                         (
                             row["transaction_id"],
                             empty_to_none(row["account_id"]),
@@ -71,3 +72,5 @@ def load_transactions():
 
 if __name__ == "__main__":
     load_transactions()
+
+"""

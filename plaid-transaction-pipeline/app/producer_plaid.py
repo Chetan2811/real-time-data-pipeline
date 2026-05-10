@@ -1,9 +1,10 @@
-'''import json
+import json
 import os
 import time
 from pathlib import Path
 
 import plaid
+from confluent_kafka import Producer
 from dotenv import load_dotenv
 from plaid.api import plaid_api
 from plaid.model.item_public_token_exchange_request import ItemPublicTokenExchangeRequest
@@ -16,7 +17,6 @@ from plaid.model.transactions_sync_request import TransactionsSyncRequest
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-RAW_FILE = ROOT_DIR / "data" / "raw" / "transactions.json"
 
 
 def get_plaid_client():
@@ -41,6 +41,13 @@ def get_plaid_client():
     return plaid_api.PlaidApi(api_client)
 
 
+def response_to_dict(response):
+    if hasattr(response, "to_dict"):
+        return response.to_dict()
+
+    return dict(response)
+
+
 def create_sandbox_access_token(client):
     request = SandboxPublicTokenCreateRequest(
         institution_id=os.getenv("PLAID_INSTITUTION_ID", "ins_109508"),
@@ -55,20 +62,14 @@ def create_sandbox_access_token(client):
 
     public_token_response = client.sandbox_public_token_create(request)
     public_token_data = response_to_dict(public_token_response)
-    public_token = public_token_data["public_token"]
 
-    exchange_request = ItemPublicTokenExchangeRequest(public_token=public_token)
+    exchange_request = ItemPublicTokenExchangeRequest(
+        public_token=public_token_data["public_token"]
+    )
     exchange_response = client.item_public_token_exchange(exchange_request)
     exchange_data = response_to_dict(exchange_response)
 
-    return exchange_data["access_token"], exchange_data["item_id"]
-
-
-def response_to_dict(response):
-    if hasattr(response, "to_dict"):
-        return response.to_dict()
-
-    return dict(response)
+    return exchange_data["access_token"]
 
 
 def plaid_error_code(error):
@@ -81,7 +82,6 @@ def plaid_error_code(error):
 
 def fetch_transactions(client, access_token):
     transactions = []
-    accounts = []
     cursor = None
 
     while True:
@@ -107,35 +107,70 @@ def fetch_transactions(client, access_token):
 
         response_dict = response_to_dict(response)
         transactions.extend(response_dict.get("added", []))
-        accounts = response_dict.get("accounts", accounts)
         cursor = response_dict.get("next_cursor")
 
         if not response_dict.get("has_more"):
             break
 
-    return {
-        "accounts": accounts,
-        "transactions": transactions,
-        "next_cursor": cursor,
-    }
+    return transactions
+
+
+def get_kafka_producer():
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+
+    return Producer(
+        {
+            "bootstrap.servers": bootstrap_servers,
+            "client.id": "plaid-transaction-producer",
+        }
+    )
+
+
+def delivery_report(error, message):
+    if error:
+        print(f"Failed to send message: {error}")
+    else:
+        key = message.key()
+        transaction_id = key.decode("utf-8") if key else "unknown"
+        print(
+            "Sent transaction "
+            f"{transaction_id} "
+            f"to {message.topic()} [{message.partition()}]"
+        )
+
+
+def send_transactions_to_kafka(transactions):
+    topic = os.getenv("KAFKA_TOPIC", "plaid_transactions_raw")
+    producer = get_kafka_producer()
+
+    for transaction in transactions:
+        transaction_id = transaction.get("transaction_id", "")
+        producer.produce(
+            topic=topic,
+            key=transaction_id,
+            value=json.dumps(transaction, default=str),
+            callback=delivery_report,
+        )
+        producer.poll(0)
+
+    producer.flush()
+    print(f"Sent {len(transactions)} transactions to Kafka topic: {topic}")
 
 
 def main():
+    load_dotenv(ROOT_DIR / ".env")
+
     client = get_plaid_client()
-    access_token, item_id = create_sandbox_access_token(client)
+    access_token = create_sandbox_access_token(client)
 
     print("Created sandbox item. Waiting for transactions to become ready...")
     time.sleep(30)
 
-    data = fetch_transactions(client, access_token)
-    data["item_id"] = item_id
+    transactions = fetch_transactions(client, access_token)
+    print(f"Fetched {len(transactions)} transactions from Plaid")
 
-    RAW_FILE.parent.mkdir(parents=True, exist_ok=True)
-    RAW_FILE.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-
-    print(f"Saved {len(data['transactions'])} transactions to {RAW_FILE}")
+    send_transactions_to_kafka(transactions)
 
 
 if __name__ == "__main__":
     main()
-'''
