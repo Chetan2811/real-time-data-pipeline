@@ -1,12 +1,8 @@
 # Plaid Transaction Pipeline
 
-<<<<<<< HEAD
 This is a small Python data pipeline for learning how an event-based ETL flow works.
 
 It uses Plaid Sandbox to create fake bank transactions, sends each transaction to Kafka, then reads those Kafka messages and saves them into PostgreSQL.
-=======
-The pipeline has three steps:
->>>>>>> 497ae34afc5fe2eb5b49be59a4fe7a524ee8e6bd
 
 The main path is:
 
