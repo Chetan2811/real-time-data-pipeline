@@ -80,9 +80,9 @@ def plaid_error_code(error):
         return None
 
 
-def fetch_transactions(client, access_token):
+def fetch_transactions(client, access_token, cursor=None):
     transactions = []
-    cursor = None
+    next_cursor = cursor
 
     while True:
         request_data = {
@@ -90,8 +90,8 @@ def fetch_transactions(client, access_token):
             "count": 500,
         }
 
-        if cursor:
-            request_data["cursor"] = cursor
+        if next_cursor:
+            request_data["cursor"] = next_cursor
 
         request = TransactionsSyncRequest(**request_data)
 
@@ -107,12 +107,13 @@ def fetch_transactions(client, access_token):
 
         response_dict = response_to_dict(response)
         transactions.extend(response_dict.get("added", []))
-        cursor = response_dict.get("next_cursor")
+        transactions.extend(response_dict.get("modified", []))
+        next_cursor = response_dict.get("next_cursor")
 
         if not response_dict.get("has_more"):
             break
 
-    return transactions
+    return transactions, next_cursor
 
 
 def get_kafka_producer():
@@ -139,10 +140,7 @@ def delivery_report(error, message):
         )
 
 
-def send_transactions_to_kafka(transactions):
-    topic = os.getenv("KAFKA_TOPIC", "plaid_transactions_raw")
-    producer = get_kafka_producer()
-
+def send_transactions_to_kafka(producer, topic, transactions):
     for transaction in transactions:
         transaction_id = transaction.get("transaction_id", "")
         producer.produce(
@@ -160,16 +158,32 @@ def send_transactions_to_kafka(transactions):
 def main():
     load_dotenv(ROOT_DIR / ".env")
 
+    poll_seconds = float(os.getenv("PLAID_POLL_SECONDS", "3"))
+    topic = os.getenv("KAFKA_TOPIC", "plaid_transactions_raw")
+
     client = get_plaid_client()
     access_token = create_sandbox_access_token(client)
+    producer = get_kafka_producer()
+    cursor = None
 
     print("Created sandbox item. Waiting for transactions to become ready...")
     time.sleep(30)
 
-    transactions = fetch_transactions(client, access_token)
-    print(f"Fetched {len(transactions)} transactions from Plaid")
+    try:
+        while True:
+            transactions, cursor = fetch_transactions(client, access_token, cursor)
 
-    send_transactions_to_kafka(transactions)
+            if transactions:
+                print(f"Fetched {len(transactions)} new transactions from Plaid")
+                send_transactions_to_kafka(producer, topic, transactions)
+            else:
+                print("No new transactions from Plaid")
+
+            time.sleep(poll_seconds)
+    except KeyboardInterrupt:
+        print("Process interrupted by user. Exiting...")
+    finally:
+        producer.flush()
 
 
 if __name__ == "__main__":
