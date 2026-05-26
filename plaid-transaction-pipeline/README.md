@@ -1,83 +1,73 @@
 # Plaid Transaction Pipeline
 
-This is a small Python data pipeline for learning how an event-based ETL flow works.
+This is a small Python project for learning an event-based data pipeline.
 
-It uses Plaid Sandbox to create fake bank transactions, sends each transaction to Kafka, then reads those Kafka messages and saves them into PostgreSQL.
-
-The main path is:
+The current pipeline is webhook-driven:
 
 ```text
-Plaid Sandbox -> Python producer -> Kafka -> Python consumer -> PostgreSQL
+Plaid Sandbox -> webhook_server.py -> Kafka -> consumer_kafka.py -> PostgreSQL
 ```
 
-## What Is In This Project
+The setup script `producer_plaid.py` creates a Plaid Sandbox Item, registers your webhook URL, performs the first transaction sync, sends the initial transaction events to Kafka, and saves the Plaid cursor locally.
+
+## Project Layout
 
 ```text
 plaid-transaction-pipeline/
 ├── app/
-│   ├── producer_plaid.py      # Gets transactions from Plaid and sends them to Kafka
-│   ├── consumer_kafka.py      # Reads Kafka messages and writes them to Postgres
+│   ├── producer_plaid.py      # Creates Plaid Sandbox Item and does initial sync
+│   ├── webhook_server.py      # Receives Plaid webhooks and syncs new updates
+│   ├── consumer_kafka.py      # Reads Kafka messages and writes to Postgres
+│   ├── plaid_pipeline.py      # Shared Plaid/Kafka helper code
 │   ├── db.py                  # Postgres connection helper
-│   ├── transform.py           # Older batch CSV transform script
-│   └── load_postgres.py       # Older batch CSV load script
+│   ├── transform.py           # Older file-based script
+│   └── load_postgres.py       # Older file-based script
 ├── data/
 │   ├── raw/
 │   └── processed/
 ├── sql/
-│   └── create_tables.sql      # Creates the transactions table
-├── docker-compose.yml         # Postgres, Kafka, and Kafka UI
+│   └── create_tables.sql
+├── docker-compose.yml
 ├── requirements.txt
 └── README.md
 ```
 
 ## Setup
 
-From the project folder:
-
-```bash
-cd plaid-transaction-pipeline
-```
-
-Create a virtual environment:
+Create and activate a virtual environment:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Install the Python packages:
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create a `.env` file:
+Create your `.env` file:
 
 ```bash
-touch .env
+cp .env.example .env
 ```
 
-Add this to `.env` and replace the Plaid values with your Sandbox credentials:
+Edit `.env` and add your Plaid Sandbox credentials.
+
+For local webhooks, expose port `5000` with a public tunnel such as ngrok:
+
+```bash
+ngrok http 5000
+```
+
+Then set:
 
 ```env
-PLAID_CLIENT_ID=your_plaid_client_id
-PLAID_SECRET=your_plaid_sandbox_secret
-PLAID_INSTITUTION_ID=ins_109508
-PLAID_SANDBOX_USERNAME=user_transactions_dynamic
-PLAID_SANDBOX_PASSWORD=pass_good
-
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-KAFKA_TOPIC=plaid_transactions_raw
-KAFKA_GROUP_ID=plaid-transaction-consumer
-
-POSTGRES_HOST=localhost
-POSTGRES_PORT=5432
-POSTGRES_DB=plaid_transactions
-POSTGRES_USER=plaid_user
-POSTGRES_PASSWORD=plaid_password
+PLAID_WEBHOOK_URL= __obtained url__
 ```
 
-## Start Docker Services
+## Start Services
 
 Start Postgres, Kafka, and Kafka UI:
 
@@ -85,129 +75,66 @@ Start Postgres, Kafka, and Kafka UI:
 docker compose up -d
 ```
 
-Check that they are running:
-
-```bash
-docker compose ps
-```
-
-Kafka UI should be available here:
+Kafka UI:
 
 ```text
 http://localhost:8080
 ```
 
-Postgres is available on:
+## Run The Real-Time Pipeline
 
-```text
-localhost:5432
-```
-
-Kafka is available to your Python code on:
-
-```text
-localhost:9092
-```
-
-## Run The Pipeline
-
-Open one terminal and start the Kafka consumer:
+Open terminal 1 and start the webhook server:
 
 ```bash
+source .venv/bin/activate
+python app/webhook_server.py
+```
+
+Open terminal 2 and start the Kafka consumer:
+
+```bash
+source .venv/bin/activate
 python app/consumer_kafka.py
 ```
 
-Leave that terminal running. It is waiting for transaction messages.
-
-Open a second terminal, activate the same virtual environment, and run the Plaid producer:
+Open terminal 3 and run the Plaid setup producer:
 
 ```bash
 source .venv/bin/activate
 python app/producer_plaid.py
 ```
 
-The producer will:
+After setup:
 
-1. Create a Plaid Sandbox item.
-2. Wait for transactions to become ready.
-3. Fetch transactions from Plaid.
-4. Send each transaction to Kafka.
+1. Plaid sends transaction webhooks to `webhook_server.py`.
+2. The webhook server calls Plaid `/transactions/sync`.
+3. New, modified, and removed transaction events are sent to Kafka.
+4. The consumer writes those events to PostgreSQL.
 
-The consumer will:
+## Check Postgres
 
-1. Read each Kafka message.
-2. Clean up the transaction fields.
-3. Insert or update the row in PostgreSQL.
-4. Commit the Kafka offset after the database write succeeds.
-
-## Check The Data
-
-After the producer finishes, check Postgres:
+Show a few rows:
 
 ```bash
 docker compose exec postgres psql -U plaid_user -d plaid_transactions -c "SELECT * FROM transactions LIMIT 5;"
 ```
 
-You can also count the rows:
+Count rows:
 
 ```bash
 docker compose exec postgres psql -U plaid_user -d plaid_transactions -c "SELECT COUNT(*) FROM transactions;"
 ```
 
-## Optional Batch Scripts
+## Important Files
 
-These are from the earlier file-based version of the project:
+`data/raw/plaid_state.json` stores the local Plaid access token and cursor. It is ignored by Git.
 
-```bash
-python app/transform.py
-python app/load_postgres.py
-```
-
-You do not need them for the Kafka flow.
-
-The Kafka flow uses:
-
-```bash
-python app/producer_plaid.py
-python app/consumer_kafka.py
-```
-
-## Useful Docker Commands
-
-Stop the containers:
-
-```bash
-docker compose down
-```
-
-Restart Kafka and Kafka UI after changing `docker-compose.yml`:
-
-```bash
-docker compose up -d --force-recreate broker kafka-ui
-```
-
-View Kafka logs:
-
-```bash
-docker compose logs --tail=100 broker
-```
-
-View Kafka UI logs:
-
-```bash
-docker compose logs --tail=100 kafka-ui
-```
-
-View Postgres logs:
-
-```bash
-docker compose logs --tail=100 postgres
-```
+`data/raw/` and `data/processed/` are for generated local data and are ignored by Git except for `.gitkeep` files.
 
 ## Notes
 
-This project uses Plaid Sandbox only. It does not connect to real bank accounts.
+This project uses Plaid Sandbox only.
 
-`app/producer_plaid.py` creates a new Plaid Sandbox item each time it runs, so running it again can create another batch of fake transactions.
+Run `producer_plaid.py` again only when you want to create a new Sandbox Item and reset the saved cursor.
 
-The generated data files under `data/raw/` and `data/processed/` are ignored by Git.
+The older `transform.py` and `load_postgres.py` scripts are not needed for the Kafka webhook path.

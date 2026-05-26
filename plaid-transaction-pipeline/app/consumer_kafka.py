@@ -106,6 +106,19 @@ def insert_transaction(connection, transaction):
     connection.commit()
 
 
+def delete_transaction(connection, transaction_id):
+    if not transaction_id:
+        raise ValueError("Removed transaction is missing transaction_id")
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM transactions WHERE transaction_id = %s;",
+            (transaction_id,),
+        )
+
+    connection.commit()
+
+
 def decode_message(message):
     value = message.value()
 
@@ -122,6 +135,18 @@ def handle_kafka_error(message):
         return
 
     raise KafkaException(error)
+
+
+def handle_transaction_event(connection, event):
+    change_type = event.get("_plaid_change_type")
+
+    if change_type == "removed":
+        transaction_id = event.get("transaction_id")
+        delete_transaction(connection, transaction_id)
+        return "deleted", transaction_id
+
+    insert_transaction(connection, event)
+    return "saved", event.get("transaction_id", "unknown")
 
 
 def consume_transactions():
@@ -149,12 +174,10 @@ def consume_transactions():
                     continue
 
                 try:
-                    transaction = decode_message(message)
-                    insert_transaction(connection, transaction)
+                    event = decode_message(message)
+                    action, transaction_id = handle_transaction_event(connection, event)
                     consumer.commit(message=message, asynchronous=False)
-
-                    transaction_id = transaction.get("transaction_id", "unknown")
-                    print(f"Saved transaction: {transaction_id}")
+                    print(f"{action.title()} transaction: {transaction_id}")
 
                 except JSONDecodeError as error:
                     print(f"Skipping invalid JSON message: {error}")
