@@ -1,167 +1,167 @@
-# Plaid Transaction Pipeline
+# Real-Time Plaid Transaction Pipeline
 
-This is a small Python project for learning an event-based data pipeline.
+This project started as a way to learn how modern event-driven data pipelines work. Instead of pulling data on a schedule, the pipeline reacts to events as they happen using Plaid webhooks, Kafka, MinIO, and PostgreSQL.
 
-The current pipeline is webhook-driven and stores raw events in MinIO before they
-are transformed and loaded:
+The goal was to simulate a simplified real-world streaming architecture where financial transaction updates are captured, stored, processed, and made available for analytics.
+
+## Architecture
 
 ```text
-Plaid Sandbox -> producer/webhook_server.py -> Kafka -> consumer_kafka.py -> MinIO -> transform.py -> PostgreSQL
+Plaid Sandbox
+      ↓
+Webhook Server
+      ↓
+Kafka
+      ↓
+Kafka Consumer
+      ↓
+MinIO (Raw Storage)
+      ↓
+Transformation Layer
+      ↓
+PostgreSQL
 ```
 
-The setup script `producer_plaid.py` creates a Plaid Sandbox Item, registers your webhook URL, performs the first transaction sync, sends the initial transaction events to Kafka, and saves the Plaid cursor locally.
+### Pipeline Flow
 
-## Project Layout
+1. Plaid generates a transaction event.
+2. A webhook notification is sent to the local webhook server.
+3. The webhook server calls Plaid's `/transactions/sync` endpoint to retrieve changes.
+4. Transaction events are published to Kafka.
+5. A Kafka consumer stores the raw events in MinIO.
+6. The transformation process reads raw files from MinIO, normalizes the data, and writes processed records back to MinIO.
+7. The transformed records are upserted into PostgreSQL for querying and analysis.
+
+This approach separates ingestion, storage, transformation, and serving layers, making the pipeline easier to extend and maintain.
+
+## Project Structure
 
 ```text
 plaid-transaction-pipeline/
 ├── app/
-│   ├── producer_plaid.py      # Creates Plaid Sandbox Item and does initial sync
-│   ├── webhook_server.py      # Receives Plaid webhooks and syncs new updates
-│   ├── consumer_kafka.py      # Reads Kafka messages and writes raw JSON to MinIO
-│   ├── minio_storage.py       # S3-compatible MinIO helper code
-│   ├── plaid_pipeline.py      # Shared Plaid/Kafka helper code
-│   ├── db.py                  # Postgres connection helper
-│   ├── transform.py           # Reads MinIO raw objects and writes to Postgres
-│   └── load_postgres.py       # Older file-based script
+│   ├── producer_plaid.py
+│   ├── webhook_server.py
+│   ├── consumer_kafka.py
+│   ├── minio_storage.py
+│   ├── plaid_pipeline.py
+│   ├── db.py
+│   ├── transform.py
+│   └── load_postgres.py
 ├── data/
-│   ├── raw/
-│   └── processed/
 ├── sql/
-│   └── create_tables.sql
 ├── docker-compose.yml
 ├── requirements.txt
 └── README.md
 ```
 
-## Setup
+### Key Components
 
-Create and activate a virtual environment:
+| File              | Purpose                                                                |
+| ----------------- | ---------------------------------------------------------------------- |
+| producer_plaid.py | Creates a Plaid Sandbox Item and performs the initial transaction sync |
+| webhook_server.py | Receives webhook events from Plaid                                     |
+| consumer_kafka.py | Consumes Kafka messages and stores raw events in MinIO                 |
+| minio_storage.py  | MinIO helper functions                                                 |
+| plaid_pipeline.py | Shared Plaid and Kafka utilities                                       |
+| transform.py      | Reads raw objects from MinIO, transforms data, and loads PostgreSQL    |
+| db.py             | PostgreSQL connection management                                       |
+
+## Getting Started
+
+### Create a Virtual Environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-Install dependencies:
+### Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Create your `.env` file:
+### Configure Environment Variables
 
 ```bash
 cp .env.example .env
 ```
 
-Edit `.env` and add your Plaid Sandbox credentials.
+Add your Plaid Sandbox credentials and webhook URL.
 
-For local webhooks, expose port `5001` with a public tunnel such as ngrok:
+For local development, expose the webhook endpoint using ngrok:
 
 ```bash
 ngrok http 5001
 ```
 
-Then set:
+Example:
 
 ```env
-PLAID_WEBHOOK_URL=https://your-ngrok-domain.ngrok-free.app/webhook/plaid
+PLAID_WEBHOOK_URL=https://your-domain.ngrok-free.app/webhook/plaid
 ```
 
-## Start Services
+## Start Infrastructure
 
-Start Postgres, Kafka, Kafka UI, and MinIO:
+The project uses Docker Compose to run Kafka, PostgreSQL, MinIO, and Kafka UI.
 
 ```bash
 docker compose up -d
 ```
 
-Kafka UI:
+### Services
+
+| Service       | URL                   |
+| ------------- | --------------------- |
+| Kafka UI      | http://localhost:8080 |
+| MinIO Console | http://localhost:9001 |
+
+Default MinIO credentials:
 
 ```text
-http://localhost:8080
+Username: minioadmin
+Password: minioadmin
 ```
 
-MinIO console:
+## Running the Pipeline
 
-```text
-http://localhost:9001
-```
+### Terminal 1
 
-Default MinIO credentials are `minioadmin` / `minioadmin`.
-
-## Run The Real-Time Pipeline
-
-Open terminal 1 and start the webhook server:
+Start the webhook server:
 
 ```bash
-source .venv/bin/activate
 python app/webhook_server.py
 ```
 
-Open terminal 2 and start the Kafka-to-MinIO streaming consumer:
+### Terminal 2
+
+Start the Kafka consumer:
 
 ```bash
-source .venv/bin/activate
 python app/consumer_kafka.py
 ```
 
-Open terminal 3 and start the MinIO-to-Postgres transform consumer:
+### Terminal 3
+
+Start the transformation process:
 
 ```bash
-source .venv/bin/activate
 python app/transform.py
 ```
 
-Open terminal 4 and run the Plaid setup producer:
+### Terminal 4
+
+Create the Plaid Sandbox Item and perform the initial sync:
 
 ```bash
-source .venv/bin/activate
 python app/producer_plaid.py
 ```
 
-After setup:
-
-1. Plaid sends transaction webhooks to `webhook_server.py`.
-2. The webhook server calls Plaid `/transactions/sync`.
-3. New, modified, and removed transaction events are sent to Kafka.
-4. `consumer_kafka.py` writes each Kafka event to MinIO under `raw/transactions/`.
-5. `transform.py` continuously polls MinIO, normalizes unprocessed raw objects, writes processed JSON under `processed/transactions/`, marks each object under `processed/_markers/`, and upserts or deletes the row in PostgreSQL.
-
-## Check Postgres
-
-Show a few rows:
-
-```bash
-docker compose exec postgres psql -U plaid_user -d plaid_transactions -c "SELECT * FROM transactions LIMIT 5;"
-```
-
-Count rows:
-
-```bash
-docker compose exec postgres psql -U plaid_user -d plaid_transactions -c "SELECT COUNT(*) FROM transactions;"
-```
-
-## Check MinIO
-
-List raw objects:
-
-```bash
-docker compose exec minio mc alias set local http://localhost:9000 minioadmin minioadmin
-docker compose exec minio mc ls --recursive local/plaid-data/raw/transactions/
-```
-
-## Important Files
-
-`data/raw/plaid_state.json` stores the local Plaid access token and cursor. It is ignored by Git.
-
-Raw and processed transaction events now live in MinIO. `data/raw/` is still used for `plaid_state.json`.
+After the initial setup, new transaction events flow through the pipeline automatically whenever Plaid sends a webhook notification.
 
 ## Notes
 
-This project uses Plaid Sandbox only.
-
-Run `producer_plaid.py` again only when you want to create a new Sandbox Item and reset the saved cursor.
-
-`load_postgres.py` is the old file-based loader and is not needed for the Kafka/MinIO path.
+* This project uses Plaid Sandbox only.
+* The Plaid access token and cursor are stored locally in `data/raw/plaid_state.json`.
+* Run `producer_plaid.py` again only if you want to create a new Sandbox Item and reset the cursor.
+* `load_postgres.py` is retained for reference but is no longer used in the Kafka → MinIO → PostgreSQL workflow.
