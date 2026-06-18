@@ -1,198 +1,154 @@
-# import json
-# import os
-# from json import JSONDecodeError
-# from pathlib import Path
+import json
+import os
+import re
+from datetime import datetime, timezone
+from json import JSONDecodeError
+from pathlib import Path
 
-# from confluent_kafka import Consumer, KafkaError, KafkaException
-# from dotenv import load_dotenv
+from confluent_kafka import Consumer, KafkaError, KafkaException
+from dotenv import load_dotenv
 
-# from db import get_connection
-
-
-# ROOT_DIR = Path(__file__).resolve().parents[1]
-# CREATE_TABLES_FILE = ROOT_DIR / "sql" / "create_tables.sql"
-
-
-# def get_kafka_consumer():
-#     bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
-#     group_id = os.getenv("KAFKA_GROUP_ID", "plaid-transaction-consumer")
-
-#     return Consumer(
-#         {
-#             "bootstrap.servers": bootstrap_servers,
-#             "group.id": group_id,
-#             "auto.offset.reset": "earliest",
-#             "enable.auto.commit": False,
-#         }
-#     )
+from minio_storage import (
+    ensure_bucket,
+    get_bucket_name,
+    get_s3_client,
+    put_json_object,
+)
 
 
-# def create_table_if_needed(connection):
-#     sql = CREATE_TABLES_FILE.read_text(encoding="utf-8")
-
-#     with connection.cursor() as cursor:
-#         cursor.execute(sql)
-
-#     connection.commit()
+ROOT_DIR = Path(__file__).resolve().parents[1]
 
 
-# def clean_category(transaction):
-#     category = transaction.get("category")
+def get_kafka_consumer():
+    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    group_id = os.getenv(
+        "KAFKA_TO_MINIO_GROUP_ID",
+        os.getenv("KAFKA_GROUP_ID", "plaid-kafka-to-minio"),
+    )
 
-#     if isinstance(category, list):
-#         return " > ".join(category)
-
-#     return category or None
-
-
-# def normalize_transaction(transaction):
-#     return {
-#         "transaction_id": transaction.get("transaction_id"),
-#         "account_id": transaction.get("account_id"),
-#         "transaction_date": transaction.get("date"),
-#         "name": transaction.get("name"),
-#         "merchant_name": transaction.get("merchant_name"),
-#         "amount": transaction.get("amount"),
-#         "iso_currency_code": transaction.get("iso_currency_code"),
-#         "category": clean_category(transaction),
-#         "pending": transaction.get("pending", False),
-#     }
+    return Consumer(
+        {
+            "bootstrap.servers": bootstrap_servers,
+            "group.id": group_id,
+            "auto.offset.reset": "earliest",
+            "enable.auto.commit": False,
+        }
+    )
 
 
-# def insert_transaction(connection, transaction):
-#     row = normalize_transaction(transaction)
+def decode_message(message):
+    value = message.value()
 
-#     if not row["transaction_id"]:
-#         raise ValueError("Transaction is missing transaction_id")
+    if value is None:
+        raise ValueError("Kafka message has no value")
 
-#     with connection.cursor() as cursor:
-#         cursor.execute(
-#             """
-#             INSERT INTO transactions (
-#                 transaction_id,
-#                 account_id,
-#                 transaction_date,
-#                 name,
-#                 merchant_name,
-#                 amount,
-#                 iso_currency_code,
-#                 category,
-#                 pending
-#             )
-#             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-#             ON CONFLICT (transaction_id) DO UPDATE SET
-#                 account_id = EXCLUDED.account_id,
-#                 transaction_date = EXCLUDED.transaction_date,
-#                 name = EXCLUDED.name,
-#                 merchant_name = EXCLUDED.merchant_name,
-#                 amount = EXCLUDED.amount,
-#                 iso_currency_code = EXCLUDED.iso_currency_code,
-#                 category = EXCLUDED.category,
-#                 pending = EXCLUDED.pending;
-#             """,
-#             (
-#                 row["transaction_id"],
-#                 row["account_id"],
-#                 row["transaction_date"],
-#                 row["name"],
-#                 row["merchant_name"],
-#                 row["amount"],
-#                 row["iso_currency_code"],
-#                 row["category"],
-#                 row["pending"],
-#             ),
-#         )
-
-#     connection.commit()
+    return json.loads(value.decode("utf-8"))
 
 
-# def delete_transaction(connection, transaction_id):
-#     if not transaction_id:
-#         raise ValueError("Removed transaction is missing transaction_id")
+def handle_kafka_error(message):
+    error = message.error()
 
-#     with connection.cursor() as cursor:
-#         cursor.execute(
-#             "DELETE FROM transactions WHERE transaction_id = %s;",
-#             (transaction_id,),
-#         )
+    if error.code() == KafkaError._PARTITION_EOF:
+        return
 
-#     connection.commit()
+    raise KafkaException(error)
 
 
-# def decode_message(message):
-#     value = message.value()
-
-#     if value is None:
-#         raise ValueError("Kafka message has no value")
-
-#     return json.loads(value.decode("utf-8"))
+def safe_key_part(value):
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(value or "unknown")).strip("-")
+    return cleaned or "unknown"
 
 
-# def handle_kafka_error(message):
-#     error = message.error()
+def message_datetime(message):
+    timestamp_type, timestamp_ms = message.timestamp()
 
-#     if error.code() == KafkaError._PARTITION_EOF:
-#         return
+    if timestamp_type > 0 and timestamp_ms is not None:
+        return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
 
-#     raise KafkaException(error)
-
-
-# def handle_transaction_event(connection, event):
-#     change_type = event.get("_plaid_change_type")
-
-#     if change_type == "removed":
-#         transaction_id = event.get("transaction_id")
-#         delete_transaction(connection, transaction_id)
-#         return "deleted", transaction_id
-
-#     insert_transaction(connection, event)
-#     return "saved", event.get("transaction_id", "unknown")
+    return datetime.now(timezone.utc)
 
 
-# def consume_transactions():
-#     load_dotenv(ROOT_DIR / ".env")
+def raw_object_key(message, event):
+    raw_prefix = os.getenv("MINIO_RAW_PREFIX", "raw/transactions/").strip("/")
+    created_at = message_datetime(message)
+    transaction_id = safe_key_part(event.get("transaction_id"))
+    topic = safe_key_part(message.topic())
 
-#     topic = os.getenv("KAFKA_TOPIC", "plaid_transactions_raw")
-#     consumer = get_kafka_consumer()
-#     consumer.subscribe([topic])
+    filename = (
+        f"{topic}-{message.partition()}-{message.offset()}-{transaction_id}.json"
+    )
 
-#     print(f"Listening for Kafka topic: {topic}")
-#     print("Press Ctrl+C to stop.")
-
-#     try:
-#         with get_connection() as connection:
-#             create_table_if_needed(connection)
-
-#             while True:
-#                 message = consumer.poll(1.0)
-
-#                 if message is None:
-#                     continue
-
-#                 if message.error():
-#                     handle_kafka_error(message)
-#                     continue
-
-#                 try:
-#                     event = decode_message(message)
-#                     action, transaction_id = handle_transaction_event(connection, event)
-#                     consumer.commit(message=message, asynchronous=False)
-#                     print(f"{action.title()} transaction: {transaction_id}")
-
-#                 except JSONDecodeError as error:
-#                     print(f"Skipping invalid JSON message: {error}")
-#                     consumer.commit(message=message, asynchronous=False)
-
-#                 except Exception:
-#                     connection.rollback()
-#                     raise
-
-#     except KeyboardInterrupt:
-#         print("Stopping consumer...")
-
-#     finally:
-#         consumer.close()
+    return (
+        f"{raw_prefix}/"
+        f"date={created_at:%Y-%m-%d}/"
+        f"hour={created_at:%H}/"
+        f"{filename}"
+    )
 
 
-# if __name__ == "__main__":
-#     consume_transactions()
+def kafka_metadata(message):
+    timestamp_type, timestamp_ms = message.timestamp()
+    key = message.key()
+
+    return {
+        "topic": message.topic(),
+        "partition": message.partition(),
+        "offset": message.offset(),
+        "key": key.decode("utf-8") if key else None,
+        "timestamp_type": timestamp_type,
+        "timestamp_ms": timestamp_ms,
+    }
+
+
+def consume_transactions_to_minio():
+    load_dotenv(ROOT_DIR / ".env")
+
+    topic = os.getenv("KAFKA_TOPIC", "plaid_transactions_raw")
+    consumer = get_kafka_consumer()
+    consumer.subscribe([topic])
+
+    s3_client = get_s3_client()
+    bucket_name = get_bucket_name()
+    ensure_bucket(s3_client, bucket_name)
+
+    print(f"Listening for Kafka topic: {topic}")
+    print(f"Writing raw transaction events to s3://{bucket_name}")
+    print("Press Ctrl+C to stop.")
+
+    try:
+        while True:
+            message = consumer.poll(1.0)
+
+            if message is None:
+                continue
+
+            if message.error():
+                handle_kafka_error(message)
+                continue
+
+            try:
+                event = decode_message(message)
+                object_key = raw_object_key(message, event)
+                payload = {
+                    "event": event,
+                    "_kafka": kafka_metadata(message),
+                    "_ingested_at": datetime.now(timezone.utc).isoformat(),
+                }
+
+                put_json_object(s3_client, bucket_name, object_key, payload)
+                consumer.commit(message=message, asynchronous=False)
+                print(f"Stored Kafka offset {message.offset()} at {object_key}")
+
+            except JSONDecodeError as error:
+                print(f"Skipping invalid JSON message: {error}")
+                consumer.commit(message=message, asynchronous=False)
+
+    except KeyboardInterrupt:
+        print("Stopping Kafka to MinIO consumer...")
+
+    finally:
+        consumer.close()
+
+
+if __name__ == "__main__":
+    consume_transactions_to_minio()
