@@ -55,6 +55,31 @@ services:
     volumes:
       - minio_data:/data
 
+  spark:
+    image: apache/spark:4.1.2
+    container_name: spark_local
+    command: ["/bin/bash", "-lc", "sleep infinity"]
+    depends_on:
+      - minio
+      - postgres
+    environment:
+      HOME: /tmp
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-plaid-data}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-plaid_transactions}
+      POSTGRES_USER: ${POSTGRES_USER:-plaid_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-plaid_password}
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-plaid_transactions}
+    ports:
+      - "4040:4040"
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./data:/opt/spark/data
+
 volumes:
   postgres_data:
   minio_data:

@@ -6,6 +6,7 @@ from json import JSONDecodeError
 from pathlib import Path
 
 from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka.admin import AdminClient, NewTopic
 from dotenv import load_dotenv
 
 from minio_storage import (
@@ -17,10 +18,48 @@ from minio_storage import (
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
+_MISSING_TOPIC_WARNINGS = set()
+
+
+def get_kafka_bootstrap_servers():
+    return os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+
+
+def ensure_kafka_topic(topic):
+    bootstrap_servers = get_kafka_bootstrap_servers()
+    partitions = int(os.getenv("KAFKA_TOPIC_PARTITIONS", "1"))
+    replication_factor = int(os.getenv("KAFKA_TOPIC_REPLICATION_FACTOR", "1"))
+    admin_client = AdminClient({"bootstrap.servers": bootstrap_servers})
+
+    metadata = admin_client.list_topics(timeout=10)
+    if topic in metadata.topics and metadata.topics[topic].error is None:
+        return
+
+    futures = admin_client.create_topics(
+        [
+            NewTopic(
+                topic,
+                num_partitions=partitions,
+                replication_factor=replication_factor,
+            )
+        ]
+    )
+
+    try:
+        futures[topic].result(timeout=10)
+        print(
+            f"Created Kafka topic {topic} "
+            f"with {partitions} partition(s), replication factor {replication_factor}"
+        )
+    except KafkaException as error:
+        kafka_error = error.args[0]
+
+        if kafka_error.code() != KafkaError.TOPIC_ALREADY_EXISTS:
+            raise
 
 
 def get_kafka_consumer():
-    bootstrap_servers = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+    bootstrap_servers = get_kafka_bootstrap_servers()
     group_id = os.getenv(
         "KAFKA_TO_MINIO_GROUP_ID",
         os.getenv("KAFKA_GROUP_ID", "plaid-kafka-to-minio"),
@@ -49,6 +88,15 @@ def handle_kafka_error(message):
     error = message.error()
 
     if error.code() == KafkaError._PARTITION_EOF:
+        return
+
+    if error.code() == KafkaError.UNKNOWN_TOPIC_OR_PART:
+        topic = message.topic()
+
+        if topic not in _MISSING_TOPIC_WARNINGS:
+            print(f"Kafka topic {topic} is not available yet. Waiting...")
+            _MISSING_TOPIC_WARNINGS.add(topic)
+
         return
 
     raise KafkaException(error)
@@ -104,6 +152,8 @@ def consume_transactions_to_minio():
     load_dotenv(ROOT_DIR / ".env")
 
     topic = os.getenv("KAFKA_TOPIC", "plaid_transactions_raw")
+    ensure_kafka_topic(topic)
+
     consumer = get_kafka_consumer()
     consumer.subscribe([topic])
 
