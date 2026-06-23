@@ -7,7 +7,7 @@ The pipeline now captures transaction updates from Plaid webhooks, streams them 
 
 ## Architecture
 
-![alt text](<Plaid Transaction Pipeline Architecture@2x.png>)
+![alt text](./plaid-transaction-pipeline/screenshots/Plaid%20Transaction%20Pipeline%20Architecture@2x.png)
 
 
 ### How the Pipeline Works
@@ -80,25 +80,25 @@ I wanted to learn how Spark works with files stored in object storage, so I adde
 
 ### Kafka Topics
 
-![alt text](ff3c537f-1d31-4ccd-af44-0ac29f0c55e5.png)
+![alt text](./plaid-transaction-pipeline/screenshots/ff3c537f-1d31-4ccd-af44-0ac29f0c55e5.png)
 
 ### MinIO Storage
 
-![alt text](1d392f61-5898-4b47-a40f-9bc08303f9bd.png)
+![alt text](./plaid-transaction-pipeline/screenshots/1d392f61-5898-4b47-a40f-9bc08303f9bd.png)
 
-![alt text](32c56762-0b52-458e-8d22-6c5aa0f27687.png)
+![alt text](./plaid-transaction-pipeline/screenshots/32c56762-0b52-458e-8d22-6c5aa0f27687.png)
 
 ### PostgreSQL Tables
 
-![alt text](d3d1efc9-3960-454b-9561-27689e1179f6.png)
+![alt text](./plaid-transaction-pipeline/screenshots/d3d1efc9-3960-454b-9561-27689e1179f6.png)
 
-![alt text](1cd5bcba-3d5b-4b2d-8e16-d32ced178468.png)
+![alt text](./plaid-transaction-pipeline/screenshots/1cd5bcba-3d5b-4b2d-8e16-d32ced178468.png)
 
 ### Sample SQL Analysis
 
-![alt text](6ac626e1-569b-4c42-8dbc-4bab381a0bac.png)
+![alt text](./plaid-transaction-pipeline/screenshots/6ac626e1-569b-4c42-8dbc-4bab381a0bac.png)
 
-![alt text](daf23c3e-9f0d-40d7-af21-5a6c7db9c43c.png)
+![alt text](./plaid-transaction-pipeline/screenshots/daf23c3e-9f0d-40d7-af21-5a6c7db9c43c.png)
 
 The SQL screenshots show monthly spending with a CTE and rolling totals using a window function.
 
