@@ -5,6 +5,10 @@ Initially, I had a simple pipeline where data was pulled from Plaid and loaded d
 
 The pipeline now captures transaction updates from Plaid webhooks, streams them through Kafka, stores raw files in MinIO, processes them using Spark, and finally loads the cleaned data into PostgreSQL for analysis.
 
+## Running the Project
+
+Detailed setup instructions are available in [HOW_TO_RUN.md](./plaid-transaction-pipeline/how%20to%20run.md).
+
 ## Architecture
 
 ![alt text](./plaid-transaction-pipeline/screenshots/Plaid%20Transaction%20Pipeline%20Architecture@2x.png)
